@@ -1,0 +1,74 @@
+cabal-version: 3.0
+name: rhine-servant
+version: 0.1.0
+synopsis: Servant frontend for Rhine
+homepage: https://github.com/ners/rhine-servant
+license: Apache-2.0
+license-file: LICENCE.md
+author: ners
+maintainer: ners@gmx.ch
+bug-reports: https://github.com/ners/rhine-servant/issues
+category: System
+build-type: Simple
+extra-source-files:
+  CHANGELOG.md
+  README.md
+
+source-repository head
+  type: git
+  location: https://github.com/ners/rhine-servant
+
+common common
+  default-language: Haskell2010
+  ghc-options:
+    -Weverything
+    -Wno-safe
+    -Wno-unsafe
+    -Wno-missing-safe-haskell-mode
+    -Wno-missing-export-lists
+    -Wno-missing-import-lists
+    -Wno-missing-kind-signatures
+    -Wno-all-missed-specialisations
+
+  default-extensions:
+    ApplicativeDo
+    BlockArguments
+    DataKinds
+    DerivingStrategies
+    FlexibleInstances
+    ImportQualifiedPost
+    MultiParamTypeClasses
+    NamedFieldPuns
+    NoImplicitPrelude
+    RecordWildCards
+    ScopedTypeVariables
+    TupleSections
+    TypeApplications
+    TypeFamilies
+    TypeOperators
+
+  build-depends:
+    aeson,
+    base >=4 && <5,
+    bytestring,
+    rhine,
+    servant,
+    servant-server,
+    stm,
+    time,
+    warp,
+
+library
+  import: common
+  hs-source-dirs: src
+  exposed-modules:
+    FRP.Rhine.Servant
+
+test-suite test
+  import: common
+  ghc-options: -threaded
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is: Main.hs
+  build-depends:
+    rhine-servant
