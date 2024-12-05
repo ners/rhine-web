@@ -6,8 +6,9 @@ module Main where
 import Control.Concurrent.STM (atomically, putTMVar)
 import Data.Aeson (FromJSON, ToJSON)
 import FRP.Rhine
-import FRP.Rhine.Servant (Request (..), RequestClock (..))
+import FRP.Rhine.Servant
 import GHC.Generics (Generic)
+import Servant
 import Prelude
 
 data State = State
@@ -23,19 +24,21 @@ tick = arr \st -> st{tickCounter = tickCounter st + 1}
 printState :: ClSF IO cl State ()
 printState = arrMCl print
 
-getRequest :: (MonadIO m) => ClSF m (RequestClock State) State State
-getRequest =
+type Api = Get '[JSON] State :<|> ReqBody '[JSON] State :> Put '[JSON] NoContent :<|> Delete '[JSON] NoContent
+
+handleRequest :: (MonadIO m) => ClSF m (RequestClock Api) State State
+handleRequest =
     returnA &&& tagS >>> arrMCl \(st, req) ->
         case req of
-            Get tmvar -> do
+            Left (GetRequest tmvar) -> do
                 let newState = st{getRequestCounter = getRequestCounter st + 1}
                 liftIO . atomically $ putTMVar tmvar newState
                 pure newState
-            Put newState -> do
-                pure newState
+            Right (Left (PutRequest newState)) -> pure newState
+            Right (Right DeleteRequest) -> pure State{tickCounter = 0, getRequestCounter = 0}
 
-getRequestRh :: (MonadIO m) => Rhine m (RequestClock State) State State
-getRequestRh = getRequest @@ RequestClock{port = 8080}
+getRequestRh :: (MonadIO m) => Rhine m (RequestClock Api) State State
+getRequestRh = handleRequest @@ RequestClock{port = 8080}
 
 main :: IO ()
 main = do
