@@ -48,21 +48,24 @@ common common
     TypeOperators
 
   build-depends:
-    aeson,
     base >=4 && <5,
-    bytestring,
     rhine,
     servant,
-    servant-server,
-    stm,
-    time,
-    warp,
 
 library
   import: common
   hs-source-dirs: src
   exposed-modules:
     FRP.Rhine.Servant
+
+  build-depends:
+    monad-schedule,
+    servant,
+    servant-server,
+    stm,
+    time,
+    transformers,
+    warp,
 
 test-suite test
   import: common
@@ -71,4 +74,8 @@ test-suite test
   hs-source-dirs: test
   main-is: Main.hs
   build-depends:
-    rhine-servant
+    aeson,
+    hspec,
+    http-client,
+    rhine-servant,
+    servant-client,
