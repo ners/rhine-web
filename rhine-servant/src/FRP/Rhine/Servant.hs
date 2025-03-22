@@ -188,7 +188,9 @@ class (MonadIO m, HasServer api '[], RhineRequest api) => HasRhineRoutes m api w
 instance (MonadIO m) => HasRhineRoutes m EmptyAPI where
     type RhineRoutes EmptyAPI = ()
     initRoutes = pure ()
-    scheduleRoutes () = constM . liftIO . forever . threadDelay $ 1_000_000_000
+    scheduleRoutes () =
+        -- TODO can we use the Never clock here?
+        constM . liftIO . Control.Monad.forever . threadDelay $ 1_000_000_000
     handler () = emptyServer
 
 instance (MonadSchedule m, HasRhineRoutes m api1, HasRhineRoutes m api2) => HasRhineRoutes m (api1 :<|> api2) where

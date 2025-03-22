@@ -2,12 +2,12 @@ cabal-version: 3.0
 name: rhine-servant
 version: 0.1.0
 synopsis: Servant frontend for Rhine
-homepage: https://github.com/ners/rhine-servant
+homepage: https://github.com/ners/rhine-web
 license: Apache-2.0
 license-file: LICENCE.md
 author: ners
 maintainer: ners@gmx.ch
-bug-reports: https://github.com/ners/rhine-servant/issues
+bug-reports: https://github.com/ners/rhine-web/issues
 category: System
 build-type: Simple
 extra-source-files:
@@ -16,7 +16,7 @@ extra-source-files:
 
 source-repository head
   type: git
-  location: https://github.com/ners/rhine-servant
+  location: https://github.com/ners/rhine-web
 
 common common
   default-language: Haskell2010
