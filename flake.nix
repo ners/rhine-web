@@ -61,6 +61,16 @@
             packageOverrides = lib.composeManyExtensions [
               prev.haskell.packageOverrides
               (cabalProjectOverlay project)
+              (hfinal: hprev: with prev.haskell.lib.compose; {
+                morpheus-graphql-app = unmarkBroken hprev.morpheus-graphql-app_0_28_1;
+                morpheus-graphql-code-gen = unmarkBroken hprev.morpheus-graphql-code-gen;
+                morpheus-graphql-code-gen-utils = hprev.morpheus-graphql-code-gen-utils_0_28_1;
+                morpheus-graphql-tests = hprev.morpheus-graphql-tests_0_28_1;
+                morpheus-graphql-client = hprev.morpheus-graphql-client_0_28_1;
+                morpheus-graphql-core = hprev.morpheus-graphql-core_0_28_1;
+                morpheus-graphql-server = hprev.morpheus-graphql-server_0_28_1;
+                morpheus-graphql-subscriptions = hprev.morpheus-graphql-subscriptions_0_28_1;
+              })
             ];
           };
         })
