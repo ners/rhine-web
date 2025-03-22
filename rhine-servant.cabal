@@ -59,7 +59,10 @@ library
     FRP.Rhine.Servant
 
   build-depends:
+    http-types,
     monad-schedule,
+    network,
+    resourcet,
     servant,
     servant-server,
     stm,
