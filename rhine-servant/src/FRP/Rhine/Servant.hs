@@ -3,10 +3,11 @@
 {-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module FRP.Rhine.Servant (RequestClock (..), RouteClock, (<@|>)) where
+module FRP.Rhine.Servant {- (RequestClock (..), RouteClock, (<@|>))-} where
 
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.STM
@@ -22,6 +23,7 @@ import Data.Time (getCurrentTime)
 import Data.Typeable (Typeable)
 import Data.Void (Void)
 import FRP.Rhine
+import GHC.Generics (Generic (..), K1 (..), M1 (..), (:*:) (..))
 import GHC.TypeLits (KnownSymbol, Nat, Symbol)
 import Network.HTTP.Types (Query)
 import Network.Socket (SockAddr)
@@ -30,9 +32,11 @@ import Network.Wai.Handler.Warp qualified as Warp
 import Servant.API
 import Servant.API.Modifiers (FoldLenient, RequestArgument)
 import Servant.Server
+import Servant.Server.Generic (AsServer, genericServe)
 import Servant.Server.Internal.ErrorFormatter (MkContextWithErrorFormatter)
 import Prelude
 
+{-
 class RhineRequest api where
     type RhineInput api
     type RhineOutput api
@@ -49,7 +53,7 @@ instance RhineRequest (CaptureAll capture a :> api) where
     type RhineInput (CaptureAll capture a :> api) = ([a], RhineInput api)
     type RhineOutput (CaptureAll capture a :> api) = RhineOutput api
 
-instance RhineRequest (WithResource a :> api) where
+instance forall (a :: Type) (api :: Type) . RhineRequest (WithResource a :> api) where
     type RhineInput (WithResource a :> api) = ((ReleaseKey, a), RhineInput api)
     type RhineOutput (WithResource a :> api) = RhineOutput api
 
@@ -156,7 +160,10 @@ instance RhineRequest (Fragment a :> api) where
 --    type RhineInput (NamedRoutes api) = RhineInput api
 --    type RhineOutput (NamedRoutes api) = RhineOutput api
 
-data RouteClock route = RouteClock {input :: TMVar (RhineInput route), output :: TMVar (RhineOutput route)}
+data RouteClock route = RouteClock
+    { input :: TMVar (RhineInput route)
+    , output :: TMVar (RhineOutput route)
+    }
 
 instance Clock m (RouteClock route) where
     type Time (RouteClock route) = UTCTime
@@ -178,12 +185,12 @@ class (MonadIO m, HasServer api '[], RhineRequest api) => HasRhineRoutes m api w
     scheduleRoutes :: RhineRoutes api -> Automaton m () (UTCTime, Tag (RequestClock m api))
 
     -- \input1 input2 ... -> do
-    --    putTMVar input1
-    --    putTMVar input2
-    --    ...
+    --    putTMVar (input1, input2, ...)
     --    takeTMVar output
 
-    handler {- HandlerContinuation api -> -} :: RhineRoutes api -> Server api
+    -- Input1 :?> (Input2 :?> ... :?> GET ...)
+    -- handle :: RouteClock api -> Input1 -> (Input2 -> Input3 -> ... -> Server (GET ...))
+    handler :: {- HandlerContinuation api -> -} RhineRoutes api -> Server api
 
 instance (MonadIO m) => HasRhineRoutes m EmptyAPI where
     type RhineRoutes EmptyAPI = ()
@@ -215,10 +222,13 @@ instance
 
     scheduleRoutes RouteClock{..} = constM . liftIO $ do
         let o = liftIO . atomically . putTMVar output
+        () <- atomically $ takeTMVar input
         t <- getCurrentTime
         pure (t, ((), o))
 
-    handler RouteClock{..} = liftIO . atomically . takeTMVar $ output
+    handler RouteClock{..} = liftIO $ do
+        atomically . putTMVar input $ ()
+        atomically . takeTMVar $ output
 
 instance
     forall (m :: Type -> Type) (method :: StdMethod)
@@ -229,10 +239,13 @@ instance
 
     scheduleRoutes RouteClock{..} = constM . liftIO $ do
         let o = liftIO . atomically . putTMVar output
+        () <- atomically $ takeTMVar input
         t <- getCurrentTime
         pure (t, ((), o))
 
-    handler RouteClock{..} = liftIO . atomically . takeTMVar $ output
+    handler RouteClock{..} = liftIO $ do
+        atomically . putTMVar input $ ()
+        atomically . takeTMVar $ output
 
 instance
     forall (m :: Type -> Type) (method :: StdMethod) (status :: Nat) (framing :: Type) (ctype :: Type) (a :: Type)
@@ -243,22 +256,28 @@ instance
 
     scheduleRoutes RouteClock{..} = constM . liftIO $ do
         let o = liftIO . atomically . putTMVar output
+        () <- atomically $ takeTMVar input
         t <- getCurrentTime
         pure (t, ((), o))
 
-    handler RouteClock{..} = liftIO . atomically . takeTMVar $ output
+    handler RouteClock{..} = liftIO $ do
+        atomically . putTMVar input $ ()
+        atomically . takeTMVar $ output
 
-instance (MonadIO m, RhineRequest (QueryString :> api), HasServer (QueryString :> api) '[], HasRhineRoutes m api) => HasRhineRoutes m (QueryString :> api) where
+instance
+    (MonadIO m, RhineRequest (QueryString :> api), HasServer (QueryString :> api) '[], HasRhineRoutes m api)
+    => HasRhineRoutes m (QueryString :> api)
+    where
     type RhineRoutes (QueryString :> api) = RouteClock (QueryString :> api)
 
-    scheduleRoutes clock@RouteClock{..} = proc () -> do
-        i <- constM (liftIO . atomically . takeTMVar $ input) -< ()
-        (t, (i2, dispatch)) <- scheduleRoutes @m @api (undefined clock) -< ()
-        returnA -< (t, ((i, i2), undefined dispatch))
+    scheduleRoutes RouteClock{..} = constM . liftIO $ do
+        let o = liftIO . atomically . putTMVar output
+        i <- atomically $ takeTMVar input
+        t <- getCurrentTime
+        pure (t, (i, o))
 
-    -- scheduleRoutes @m @api clock
-
-    handler RouteClock{..} = liftIO . atomically . takeTMVar $ output
+    handler RouteClock{..} = undefined -- liftIO $ do
+        -- atomically . takeTMVar $ output
 
 newtype RequestClock (m :: Type -> Type) api = RequestClock {port :: Port}
 
@@ -276,7 +295,11 @@ instance GetClockProxy (RequestClock m api)
 
 infixr 3 <@|>
 
-(<@|>) :: (Monad m) => ClSF m (RouteClock route) st (st, RhineOutput route) -> ClSF m (RequestClock m api) st st -> ClSF m (RequestClock m (route :<|> api)) st st
+(<@|>)
+    :: (Monad m)
+    => ClSF m (RouteClock route) st (st, RhineOutput route)
+    -> ClSF m (RequestClock m api) st st
+    -> ClSF m (RequestClock m (route :<|> api)) st st
 handler' <@|> rest = proc st -> do
     (tag, dispatch) <- tagS -< ()
     case tag of
@@ -290,3 +313,92 @@ handler' <@|> rest = proc st -> do
     hoistRouteClock = hoistS $ withReaderT . retag $ fromLeft undefined . fst
     hoistRequestClock :: (Monad m) => ClSF m (RequestClock m api) a b -> ClSF m (RequestClock m (route :<|> api)) a b
     hoistRequestClock = hoistS $ withReaderT . retag $ \(i, dispatch) -> (fromRight undefined i, dispatch . Right)
+-}
+
+data RouteClock route = RouteClock
+    { input :: TMVar (RouteInput route)
+    , output :: TMVar (RouteOutput route)
+    }
+
+instance Clock m (RouteClock route) where
+    type Time (RouteClock route) = UTCTime
+    type Tag (RouteClock route) = RouteInput route
+    initClock = undefined
+
+type family RouteInput api :: Type
+
+type instance
+    RouteInput (ReqBody' mods _ a :> api) =
+        (If (FoldLenient mods) (Either String a) a, RouteInput api)
+
+type instance RouteInput (QueryString :> api) = (Query, RouteInput api)
+
+type instance RouteInput (Verb _ _ _ _) = ()
+
+type family RouteOutput api :: Type
+
+type instance RouteOutput (Verb _ _ _ a) = a
+
+type instance RouteOutput (_ :> api) = RouteOutput api
+
+data AsServerClSF (m :: Type -> Type) (state :: Type)
+
+instance GenericMode (AsServerClSF m state) where
+    type
+        (AsServerClSF m state) :- api =
+            ClSF m (RouteClock api) state (state, RouteOutput api)
+
+data AsRouteClock
+
+instance GenericMode AsRouteClock where
+    type AsRouteClock :- api = RouteClock api
+
+type ToInnerClock routes = GToInnerClock (Rep (routes AsRouteClock))
+
+class GInnerClock f where
+    type GToInnerClock f
+    initRouteClock :: IO (f p)
+
+instance GInnerClock f => GInnerClock (M1 i c f) where
+    type GToInnerClock (M1 i c f) = GToInnerClock f
+    initRouteClock = M1 <$> initRouteClock
+
+instance GInnerClock (K1 i (RouteClock api)) where
+    type GToInnerClock (K1 i (RouteClock api)) = RouteClock api
+    initRouteClock = K1 <$> do
+        input <- newEmptyTMVarIO
+        output <- newEmptyTMVarIO
+        pure RouteClock{..}
+
+instance (GInnerClock l, GInnerClock r) => GInnerClock (l :*: r) where
+    type GToInnerClock (l :*: r) = GToInnerClock l `ParallelClock` GToInnerClock r
+    initRouteClock = (:*:) <$> initRouteClock <*> initRouteClock
+
+newtype RequestClock (routes :: Type -> Type) = RequestClock {port :: Port}
+
+instance
+    forall m routes
+     . ( MonadIO m
+       , HasServer (ToServantApi routes) '[]
+       , GenericServant routes AsServer
+       , Server (ToServantApi routes) ~ ToServant routes AsServer
+       )
+    => Clock m (RequestClock routes)
+    where
+    type Time (RequestClock routes) = UTCTime
+    type Tag (RequestClock routes) = ()
+    initClock RequestClock{..} = do
+        -- routes <- initRoutes @m
+        -- let clock = scheduleRoutes @m @api routes
+        time <- liftIO getCurrentTime
+        void . liftIO . forkIO . Warp.run port . genericServe @routes $ undefined
+        -- handler @m @api routes
+        pure (undefined, time)
+
+instance GetClockProxy (RequestClock routes)
+
+genericServeClSF
+    :: (MonadIO m)
+    => routes (AsServerClSF m state)
+    -> ClSF m (RequestClock routes) state state
+genericServeClSF = undefined

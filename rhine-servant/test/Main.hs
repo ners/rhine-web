@@ -34,15 +34,16 @@ tick = arr \st -> st{tickCounter = tickCounter st + 1}
 printState :: ClSF IO cl State ()
 printState = arrMCl print
 
-type Api = Get '[JSON] State :<|> ReqBody '[JSON] State :> Put '[JSON] NoContent :<|> Delete '[JSON] NoContent :<|> EmptyAPI
+data Routes route = Routes
+    { get :: route :- Get '[JSON] State
+    , put :: route :- ReqBody '[JSON] State :> Put '[JSON] NoContent
+    , delete :: route :- Delete '[JSON] NoContent
+    }
 
-getM :: ClientM State
-putM :: State -> ClientM NoContent
-deleteM :: ClientM NoContent
-getM :<|> putM :<|> deleteM :<|> EmptyClient = client $ Proxy @Api
+type Api = ToServantApi Routes
 
 apiSf :: forall m. (MonadIO m) => ClSF m (RequestClock m Api) State State
-apiSf = getSf <@|> putSf <@|> deleteSf <@|> arr id
+apiSf = genericServeClSF Routes{get = getSf, put = putSf, delete = deleteSf}
   where
     getSf :: ClSF m (RouteClock (Get '[JSON] State)) State (State, State)
     getSf = arr \st -> let st' = st{getRequestCounter = getRequestCounter st + 1} in (st', st')
