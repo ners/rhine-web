@@ -18,6 +18,7 @@ import Data.Kind (Type)
 import Data.Time (getCurrentTime)
 import FRP.Rhine
 import GHC.Generics (Generic (..), K1 (..), M1 (..), (:*:) (..))
+import GHC.TypeLits (Symbol)
 import Network.HTTP.Types (Query)
 import Network.Wai.Handler.Warp (Port)
 import Network.Wai.Handler.Warp qualified as Warp
@@ -324,6 +325,8 @@ type instance
 
 type instance RouteInput (QueryString :> api) = (Query, RouteInput api)
 
+type instance RouteInput ((_path :: Symbol) :> api) = RouteInput api
+
 type instance RouteInput (Verb _ _ _ _) = ()
 
 type family RouteOutput api :: Type
@@ -340,6 +343,9 @@ instance (StoreInputs api) => StoreInputs (ReqBody' mods list a :> api) where
 
 instance (StoreInputs api) => StoreInputs (QueryString :> api) where
     withInputs store k query = withInputs @api (store . (query,)) k
+
+instance (StoreInputs api) => StoreInputs ((_path :: Symbol) :> api) where
+    withInputs = withInputs @api
 
 instance StoreInputs (Verb method status ctypes a) where
     withInputs store k = store () >> k

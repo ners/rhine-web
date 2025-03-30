@@ -1,11 +1,14 @@
+{-# LANGUAGE Arrows #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Main where
 
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Exception (bracket)
+import Control.Monad (void)
 import Control.Monad.Schedule.Class
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Void (Void)
@@ -13,6 +16,7 @@ import FRP.Rhine
 import FRP.Rhine.Servant
 import GHC.Generics (Generic)
 import Network.HTTP.Client (defaultManagerSettings, newManager)
+import Network.HTTP.Types.URI (Query)
 import Servant.API
 import Servant.Client
     ( AsClientT
@@ -47,6 +51,7 @@ data Routes route = Routes
     { get :: route :- Get '[JSON] State
     , put :: route :- ReqBody '[JSON] State :> Put '[JSON] NoContent
     , delete :: route :- Delete '[JSON] NoContent
+    , queries :: route :- "queries" :> QueryString :> Get '[JSON] String
     }
     deriving stock (Generic)
 
@@ -61,6 +66,10 @@ apiSf = genericServeClSF Routes{..}
     put = tagS >>> arr (\((st, ()), _) -> (st, NoContent))
     delete :: ClSF m (RouteClock (Delete '[JSON] NoContent)) State (State, NoContent)
     delete = arr_ (emptyState, NoContent)
+    queries :: ClSF m (RouteClock ("queries" :> QueryString :> Get '[JSON] String)) State (State, String)
+    queries = proc st -> do
+        ((qs, ()), _) <- tagS -< ()
+        returnA -< (st, show qs)
 
 startApi :: IO Void
 startApi = do
@@ -136,3 +145,12 @@ main =
             liftIO do
                 tickCounter st3 `shouldSatisfy` (>= tickCounter putState)
                 getRequestCounter st3 `shouldBe` (getRequestCounter putState + 1)
+
+            let q :: Query
+                q = [("This", Just "is"), ("a", Just "query"), ("string", Nothing)]
+            r <- apiClient.queries q
+            st4 <- apiClient.get
+            liftIO do
+                tickCounter st4 `shouldSatisfy` (>= tickCounter st3)
+                getRequestCounter st4 `shouldBe` (getRequestCounter st3 + 1)
+                r `shouldBe` show q
