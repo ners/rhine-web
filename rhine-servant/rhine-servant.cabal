@@ -82,5 +82,7 @@ test-suite test
   build-depends:
     hspec,
     http-client,
+    monad-schedule,
     rhine-servant,
     servant-client,
+    servant-client-core,
