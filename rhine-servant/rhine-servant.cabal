@@ -48,7 +48,6 @@ common common
     TypeOperators
 
   build-depends:
-    aeson,
     base >=4 && <5,
     rhine,
     servant,
@@ -58,8 +57,6 @@ library
   hs-source-dirs: src
   exposed-modules:
     FRP.Rhine.Servant
-  other-modules:
-    FRP.Rhine.Foo
 
   build-depends:
     http-types,
@@ -80,6 +77,7 @@ test-suite test
   hs-source-dirs: test
   main-is: Main.hs
   build-depends:
+    aeson,
     hspec,
     http-client,
     http-types,

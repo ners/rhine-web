@@ -8,7 +8,6 @@ module Main where
 
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Exception (bracket)
-import Control.Monad (void)
 import Control.Monad.Schedule.Class
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Void (Void)
@@ -73,7 +72,6 @@ apiSf = genericServeClSF Routes{..}
 
 startApi :: IO Void
 startApi = do
-    let initialState = State{tickCounter = 0, getRequestCounter = 0}
     let port = 8080 :: Int
     let tickRh :: Rhine IO (Millisecond 1) State State
         tickRh = tick @@ waitClock
@@ -82,8 +80,8 @@ startApi = do
     let apiRh :: (MonadIO m, MonadSchedule m) => Rhine m (RequestClock Routes) State State
         apiRh = apiSf @@ RequestClock{..}
     flow $
-        feedbackRhine (keepLast initialState) (snd ^>>@ (tickRh |@| apiRh) @>>^ \st -> (st, st))
-            >-- keepLast initialState
+        feedbackRhine (keepLast emptyState) (snd ^>>@ (tickRh |@| apiRh) @>>^ \st -> (st, st))
+            >-- keepLast emptyState
             --> printRh
 
 setup :: IO (ThreadId, ClientEnv)
@@ -121,36 +119,38 @@ withApi = bracket setup teardown . (. snd)
 apiClient :: Routes (AsClientT ClientM)
 apiClient = genericClient
 
-main :: IO ()
-main =
-    hspec . around withApi . it "works" $
-        fmap (either (error . show) id) . runClientM do
-            st0 <- apiClient.get
-            liftIO do
-                tickCounter st0 `shouldSatisfy` (> tickCounter emptyState)
-                getRequestCounter st0 `shouldBe` getRequestCounter emptyState + 1
-                threadDelay 1000
-            st1 <- apiClient.get
-            liftIO do
-                tickCounter st1 `shouldSatisfy` (> tickCounter st0)
-                getRequestCounter st1 `shouldBe` getRequestCounter st0 + 1
-            apiClient.delete
-            st2 <- apiClient.get
-            liftIO do
-                tickCounter st2 `shouldSatisfy` (< tickCounter st1)
-                getRequestCounter st2 `shouldBe` getRequestCounter emptyState + 1
-            let putState = State{tickCounter = 10 ^ 9, getRequestCounter = 42}
-            apiClient.put putState
-            st3 <- apiClient.get
-            liftIO do
-                tickCounter st3 `shouldSatisfy` (>= tickCounter putState)
-                getRequestCounter st3 `shouldBe` (getRequestCounter putState + 1)
+runClientM' :: ClientM a -> ClientEnv -> IO a
+runClientM' a e = either (error . show) id <$> runClientM a e
 
-            let q :: Query
-                q = [("This", Just "is"), ("a", Just "query"), ("string", Nothing)]
-            r <- apiClient.queries q
-            st4 <- apiClient.get
-            liftIO do
-                tickCounter st4 `shouldSatisfy` (>= tickCounter st3)
-                getRequestCounter st4 `shouldBe` (getRequestCounter st3 + 1)
-                r `shouldBe` show q
+main :: IO ()
+main = hspec . around withApi . it "works" $ runClientM' do
+    liftIO $ threadDelay 1000
+    st0 <- apiClient.get
+    liftIO do
+        tickCounter st0 `shouldSatisfy` (> tickCounter emptyState)
+        getRequestCounter st0 `shouldBe` getRequestCounter emptyState + 1
+        threadDelay 1000
+    st1 <- apiClient.get
+    liftIO do
+        tickCounter st1 `shouldSatisfy` (> tickCounter st0)
+        getRequestCounter st1 `shouldBe` getRequestCounter st0 + 1
+    apiClient.delete
+    st2 <- apiClient.get
+    liftIO do
+        tickCounter st2 `shouldSatisfy` (< tickCounter st1)
+        getRequestCounter st2 `shouldBe` getRequestCounter emptyState + 1
+    let putState = State{tickCounter = 10 ^ (9 :: Int), getRequestCounter = 42}
+    apiClient.put putState
+    st3 <- apiClient.get
+    liftIO do
+        tickCounter st3 `shouldSatisfy` (>= tickCounter putState)
+        getRequestCounter st3 `shouldBe` (getRequestCounter putState + 1)
+
+    let q :: Query
+        q = [("This", Just "is"), ("a", Just "query"), ("string", Nothing)]
+    r <- apiClient.queries q
+    st4 <- apiClient.get
+    liftIO do
+        tickCounter st4 `shouldSatisfy` (>= tickCounter st3)
+        getRequestCounter st4 `shouldBe` (getRequestCounter st3 + 1)
+        r `shouldBe` show q

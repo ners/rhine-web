@@ -6,306 +6,177 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module FRP.Rhine.Servant {- (RequestClock (..), RouteClock, (<@|>))-} where
+module FRP.Rhine.Servant (RequestClock (..), RouteClock, genericServeClSF) where
 
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM
 import Control.Monad.Schedule.Class (MonadSchedule)
 import Control.Monad.Trans.Reader (withReaderT)
+import Control.Monad.Trans.Resource (ReleaseKey)
 import Data.Either (fromLeft, fromRight)
 import Data.Functor (void)
 import Data.Kind (Type)
 import Data.Time (getCurrentTime)
+import Data.Void (Void)
 import FRP.Rhine
 import GHC.Generics (Generic (..), K1 (..), M1 (..), (:*:) (..))
 import GHC.TypeLits (Symbol)
 import Network.HTTP.Types (Query)
+import Network.Socket (SockAddr)
 import Network.Wai.Handler.Warp (Port)
 import Network.Wai.Handler.Warp qualified as Warp
 import Servant.API
-import Servant.API.Modifiers (FoldLenient)
+import Servant.API.Modifiers (FoldLenient, RequestArgument)
 import Servant.Server
 import Servant.Server.Generic (AsServer, genericServe)
 import Prelude
 
-{-
-class RhineRequest api where
-    type RhineInput api
-    type RhineOutput api
+type family RouteInput api :: Type
 
-instance RhineRequest (api1 :<|> api2) where
-    type RhineInput (api1 :<|> api2) = Either (RhineInput api1) (RhineInput api2)
-    type RhineOutput (api1 :<|> api2) = Either (RhineOutput api1) (RhineOutput api2)
+type family RouteOutput api :: Type
 
-instance RhineRequest (Capture' mods capture a :> api) where
-    type RhineInput (Capture' mods capture a :> api) = (If (FoldLenient mods) (Either String a) a, RhineInput api)
-    type RhineOutput (Capture' mods capture a :> api) = RhineOutput api
+class StoreInputs route where
+    withInputs :: (RouteInput route -> Handler ()) -> Handler (RouteOutput route) -> Server route
 
-instance RhineRequest (CaptureAll capture a :> api) where
-    type RhineInput (CaptureAll capture a :> api) = ([a], RhineInput api)
-    type RhineOutput (CaptureAll capture a :> api) = RhineOutput api
+type instance RouteInput (Capture' mods _ a :> api) = (If (FoldLenient mods) (Either String a) a, RouteInput api)
 
-instance forall (a :: Type) (api :: Type) . RhineRequest (WithResource a :> api) where
-    type RhineInput (WithResource a :> api) = ((ReleaseKey, a), RhineInput api)
-    type RhineOutput (WithResource a :> api) = RhineOutput api
+instance (StoreInputs api) => StoreInputs (Capture' mods capture a :> api) where
+    withInputs store k a = withInputs @api (store . (a,)) k
 
-instance
-    forall (method :: StdMethod) (status :: Nat) (ctypes :: [Type]) (a :: Type)
-     . RhineRequest (Verb method status ctypes a)
-    where
-    type RhineInput (Verb method status ctypes a) = ()
-    type RhineOutput (Verb method status ctypes a) = a
+type instance RouteInput (CaptureAll _ a :> api) = ([a], RouteInput api)
 
-instance forall (method :: StdMethod). RhineRequest (NoContentVerb method) where
-    type RhineInput (NoContentVerb method) = ()
-    type RhineOutput (NoContentVerb method) = NoContent
+instance (StoreInputs api) => StoreInputs (CaptureAll sym a :> api) where
+    withInputs store k as = withInputs @api (store . (as,)) k
 
-instance
-    forall (method :: StdMethod) (status :: Nat) (framing :: Type) (ctype :: Type) (a :: Type)
-     . RhineRequest (Stream method status framing ctype a)
-    where
-    type RhineInput (Stream method status framing ctype a) = ()
-    type RhineOutput (Stream method status framing ctype a) = a
+type instance RouteInput (WithResource a :> api) = ((ReleaseKey, a), RouteInput api)
 
-instance RhineRequest (Header' mods sym a :> api) where
-    type RhineInput (Header' mods sym a :> api) = (RequestArgument mods a, RhineInput api)
-    type RhineOutput (Header' mods sym a :> api) = RhineOutput api
+-- instance (StoreInputs api) => StoreInputs (WithResource a :> api) where
+--     withInputs store k a = withInputs @api (store . (a,)) k
 
-instance RhineRequest (QueryParam' mods sym a :> api) where
-    type RhineInput (QueryParam' mods sym a :> api) = (RequestArgument mods a, RhineInput api)
-    type RhineOutput (QueryParam' mods sym a :> api) = RhineOutput api
+type instance RouteInput (Verb _ _ _ _) = ()
 
-instance RhineRequest (QueryParams sym a :> api) where
-    type RhineInput (QueryParams sym a :> api) = ([a], RhineInput api)
-    type RhineOutput (QueryParams sym a :> api) = RhineOutput api
+type instance RouteOutput (Verb _ _ _ a) = a
 
-instance RhineRequest (QueryFlag sym :> api) where
-    type RhineInput (QueryFlag sym :> api) = (Bool, RhineInput api)
-    type RhineOutput (QueryFlag sym :> api) = RhineOutput api
+instance StoreInputs (Verb method status ctypes a) where
+    withInputs store k = store () >> k
 
-instance RhineRequest (QueryString :> api) where
-    type RhineInput (QueryString :> api) = (Query, RhineInput api)
-    type RhineOutput (QueryString :> api) = RhineOutput api
+type instance RouteInput (NoContentVerb _) = ()
 
-instance RhineRequest (DeepQuery sym a :> api) where
-    type RhineInput (DeepQuery sym a :> api) = (a, RhineInput api)
-    type RhineOutput (DeepQuery sym a :> api) = RhineOutput api
+type instance RouteOutput (NoContentVerb _) = NoContent
 
-instance RhineRequest (ReqBody' mods list a :> api) where
-    type RhineInput (ReqBody' mods list a :> api) = (If (FoldLenient mods) (Either String a) a, RhineInput api)
-    type RhineOutput (ReqBody' mods list a :> api) = RhineOutput api
+instance StoreInputs (NoContentVerb method) where
+    withInputs store k = store () >> k
 
-instance RhineRequest (StreamBody' mods framing ctype a :> api) where
-    type RhineInput (StreamBody' mods framing ctype a :> api) = (a, RhineInput api)
-    type RhineOutput (StreamBody' mods framing ctype a :> api) = RhineOutput api
+type instance RouteInput (Stream _ _ _ _ _) = ()
 
-instance forall (path :: Symbol) api. RhineRequest (path :> api) where
-    type RhineInput (path :> api) = RhineInput api
-    type RhineOutput (path :> api) = RhineOutput api
+type instance RouteOutput (Stream _ _ _ _ a) = a
 
-instance RhineRequest (RemoteHost :> api) where
-    type RhineInput (RemoteHost :> api) = (SockAddr, RhineInput api)
-    type RhineOutput (RemoteHost :> api) = RhineOutput api
+instance StoreInputs (Stream method status framing contentType a) where
+    withInputs store k = store () >> k
 
-instance RhineRequest (IsSecure :> api) where
-    type RhineInput (IsSecure :> api) = (IsSecure, RhineInput api)
-    type RhineOutput (IsSecure :> api) = RhineOutput api
+type instance RouteInput (Header' mods _ a :> api) = (RequestArgument mods a, RouteInput api)
 
-instance RhineRequest (Vault :> api) where
-    type RhineInput (Vault :> api) = (Vault, RhineInput api)
-    type RhineOutput (Vault :> api) = RhineOutput api
+instance (StoreInputs api) => StoreInputs (Header' mods sym a :> api) where
+    withInputs store k h = withInputs @api (store . (h,)) k
 
-instance RhineRequest (HttpVersion :> api) where
-    type RhineInput (HttpVersion :> api) = (HttpVersion, RhineInput api)
-    type RhineOutput (HttpVersion :> api) = RhineOutput api
+type instance RouteInput (QueryParam' mods _ a :> api) = (RequestArgument mods a, RouteInput api)
 
-instance RhineRequest (Summary desc :> api) where
-    type RhineInput (Summary desc :> api) = RhineInput api
-    type RhineOutput (Summary desc :> api) = RhineOutput api
+-- instance (StoreInputs api) => StoreInputs (QueryParam' mods sym a) where
+--     withInputs store k a = withInputs @api (store . (a,)) k
 
-instance RhineRequest (Description desc :> api) where
-    type RhineInput (Description desc :> api) = RhineInput api
-    type RhineOutput (Description desc :> api) = RhineOutput api
+type instance RouteInput (QueryParams _ a :> api) = ([a], RouteInput api)
 
-instance RhineRequest EmptyAPI where
-    type RhineInput EmptyAPI = Void
-    type RhineOutput EmptyAPI = Void
+-- instance (StoreInputs api) => StoreInputs (QueryParams sym a) where
+--     withInputs store k as = withInputs @api (store . (as,)) k
 
-instance RhineRequest (EmptyAPI :> api) where
-    type RhineInput (EmptyAPI :> api) = RhineInput api
-    type RhineOutput (EmptyAPI :> api) = RhineOutput api
+type instance RouteInput (QueryFlag _ :> api) = (Bool, RouteInput api)
 
-instance RhineRequest (BasicAuth realm usr :> api) where
-    type RhineInput (BasicAuth realm usr :> api) = (usr, RhineInput api)
-    type RhineOutput (BasicAuth realm usr :> api) = RhineOutput api
+-- instance (StoreInputs api) => StoreInputs (QueryFlag sym) where
+--     withInputs store k b = withInputs @api (store . (b,)) k
 
-instance RhineRequest (WithNamedContext name subContext subApi) where
-    type RhineInput (WithNamedContext name subContext subApi) = RhineInput subApi
-    type RhineOutput (WithNamedContext name subContext subApi) = RhineOutput subApi
+type instance RouteInput (QueryString :> api) = (Query, RouteInput api)
 
-instance RhineRequest (Fragment a :> api) where
-    type RhineInput (Fragment a :> api) = RhineInput api
-    type RhineOutput (Fragment a :> api) = RhineOutput api
+instance (StoreInputs api) => StoreInputs (QueryString :> api) where
+    withInputs store k query = withInputs @api (store . (query,)) k
 
--- TODO
--- instance RhineRequest (NamedRoutes api) where
---    type RhineInput (NamedRoutes api) = RhineInput api
---    type RhineOutput (NamedRoutes api) = RhineOutput api
+type instance RouteInput (DeepQuery _ a :> api) = (a, RouteInput api)
 
-data RouteClock route = RouteClock
-    { input :: TMVar (RhineInput route)
-    , output :: TMVar (RhineOutput route)
-    }
+-- instance (StoreInputs api) => StoreInputs (DeepQuery sym a) where
+--     withInputs store k a = withInputs @api (store . (a,)) k
 
-instance Clock m (RouteClock route) where
-    type Time (RouteClock route) = UTCTime
-    type Tag (RouteClock route) = RhineInput route
-    initClock = undefined
+type instance RouteInput (ReqBody' mods _ a :> api) = (If (FoldLenient mods) (Either String a) a, RouteInput api)
 
-class (MonadIO m, HasServer api '[], RhineRequest api) => HasRhineRoutes m api where
-    type RhineRoutes api
+instance (StoreInputs api) => StoreInputs (ReqBody' mods list a :> api) where
+    withInputs store k body = withInputs @api (store . (body,)) k
 
-    -- type HandlerContinuation api
+type instance RouteInput (StreamBody' _ _ _ a :> api) = (a, RouteInput api)
 
-    initRoutes :: m (RhineRoutes api)
-    default initRoutes :: (RhineRoutes api ~ RouteClock api) => m (RhineRoutes api)
-    initRoutes = liftIO do
-        input <- newEmptyTMVarIO
-        output <- newEmptyTMVarIO
-        pure RouteClock{..}
+-- instance (StoreInputs api) => StoreInputs (StreamBody' mods framing contentType a) where
+--     withInputs store k body = withInputs @api (store . (body,)) k
 
-    scheduleRoutes :: RhineRoutes api -> Automaton m () (UTCTime, Tag (RequestClock m api))
+type instance RouteInput ((_path :: Symbol) :> api) = RouteInput api
 
-    -- \input1 input2 ... -> do
-    --    putTMVar (input1, input2, ...)
-    --    takeTMVar output
+instance (StoreInputs api) => StoreInputs ((_path :: Symbol) :> api) where
+    withInputs = withInputs @api
 
-    -- Input1 :?> (Input2 :?> ... :?> GET ...)
-    -- handle :: RouteClock api -> Input1 -> (Input2 -> Input3 -> ... -> Server (GET ...))
-    handler :: {- HandlerContinuation api -> -} RhineRoutes api -> Server api
+type instance RouteInput (RemoteHost :> api) = (SockAddr, RouteInput api)
 
-instance (MonadIO m) => HasRhineRoutes m EmptyAPI where
-    type RhineRoutes EmptyAPI = ()
-    initRoutes = pure ()
-    scheduleRoutes () =
-        -- TODO can we use the Never clock here?
-        constM . liftIO . Control.Monad.forever . threadDelay $ 1_000_000_000
-    handler () = emptyServer
+instance (StoreInputs api) => StoreInputs (RemoteHost :> api) where
+    withInputs store k a = withInputs @api (store . (a,)) k
 
-instance (MonadSchedule m, HasRhineRoutes m api1, HasRhineRoutes m api2) => HasRhineRoutes m (api1 :<|> api2) where
-    type RhineRoutes (api1 :<|> api2) = (RhineRoutes api1, RhineRoutes api2)
-    initRoutes = (,) <$> initRoutes @m @api1 <*> initRoutes @m @api2
+type instance RouteInput (IsSecure :> api) = (IsSecure, RouteInput api)
 
-    scheduleRoutes (r1, r2) = schedulePair (second dispatchL <$> scheduleRoutes @m @api1 r1) (second dispatchR <$> scheduleRoutes @m @api2 r2)
-      where
-        dispatchL :: (i1, o1 -> m ()) -> (Either i1 i2, Either o1 o2 -> m ())
-        dispatchL (i, dispatch) = (Left i, dispatch . fromLeft undefined)
-        dispatchR :: (i2, o2 -> m ()) -> (Either i1 i2, Either o1 o2 -> m ())
-        dispatchR (i, dispatch) = (Right i, dispatch . fromRight undefined)
+instance (StoreInputs api) => StoreInputs (IsSecure :> api) where
+    withInputs store k a = withInputs @api (store . (a,)) k
 
-    handler (r1, r2) = handler @m @api1 r1 :<|> handler @m @api2 r2
+type instance RouteInput (Vault :> api) = (Vault, RouteInput api)
 
-instance
-    forall (m :: Type -> Type) (method :: StdMethod) (status :: Nat) (ctypes :: [Type]) (a :: Type)
-     . (MonadIO m, HasServer (Verb method status ctypes a) '[])
-    => HasRhineRoutes m (Verb method status ctypes a)
-    where
-    type RhineRoutes (Verb method status ctypes a) = RouteClock (Verb method status ctypes a)
+instance (StoreInputs api) => StoreInputs (Vault :> api) where
+    withInputs store k a = withInputs @api (store . (a,)) k
 
-    scheduleRoutes RouteClock{..} = constM . liftIO $ do
-        let o = liftIO . atomically . putTMVar output
-        () <- atomically $ takeTMVar input
-        t <- getCurrentTime
-        pure (t, ((), o))
+type instance RouteInput (HttpVersion :> api) = (HttpVersion, RouteInput api)
 
-    handler RouteClock{..} = liftIO $ do
-        atomically . putTMVar input $ ()
-        atomically . takeTMVar $ output
+instance (StoreInputs api) => StoreInputs (HttpVersion :> api) where
+    withInputs store k a = withInputs @api (store . (a,)) k
 
-instance
-    forall (m :: Type -> Type) (method :: StdMethod)
-     . (MonadIO m, HasServer (NoContentVerb method) '[])
-    => HasRhineRoutes m (NoContentVerb method)
-    where
-    type RhineRoutes (NoContentVerb method) = RouteClock (NoContentVerb method)
+type instance RouteInput (Summary _ :> api) = RouteInput api
 
-    scheduleRoutes RouteClock{..} = constM . liftIO $ do
-        let o = liftIO . atomically . putTMVar output
-        () <- atomically $ takeTMVar input
-        t <- getCurrentTime
-        pure (t, ((), o))
+instance (StoreInputs api) => StoreInputs (Summary desc :> api) where
+    withInputs = withInputs @api
 
-    handler RouteClock{..} = liftIO $ do
-        atomically . putTMVar input $ ()
-        atomically . takeTMVar $ output
+type instance RouteInput (Description _ :> api) = RouteInput api
 
-instance
-    forall (m :: Type -> Type) (method :: StdMethod) (status :: Nat) (framing :: Type) (ctype :: Type) (a :: Type)
-     . (MonadIO m, HasServer (Stream method status framing ctype a) '[])
-    => HasRhineRoutes m (Stream method status framing ctype a)
-    where
-    type RhineRoutes (Stream method status framing ctype a) = RouteClock (Stream method status framing ctype a)
+instance (StoreInputs api) => StoreInputs (Description desc :> api) where
+    withInputs = withInputs @api
 
-    scheduleRoutes RouteClock{..} = constM . liftIO $ do
-        let o = liftIO . atomically . putTMVar output
-        () <- atomically $ takeTMVar input
-        t <- getCurrentTime
-        pure (t, ((), o))
+type instance RouteInput EmptyAPI = Void
 
-    handler RouteClock{..} = liftIO $ do
-        atomically . putTMVar input $ ()
-        atomically . takeTMVar $ output
+type instance RouteOutput EmptyAPI = Void
 
-instance
-    (MonadIO m, RhineRequest (QueryString :> api), HasServer (QueryString :> api) '[], HasRhineRoutes m api)
-    => HasRhineRoutes m (QueryString :> api)
-    where
-    type RhineRoutes (QueryString :> api) = RouteClock (QueryString :> api)
+instance StoreInputs EmptyAPI where
+    withInputs _ _ = emptyServer
 
-    scheduleRoutes RouteClock{..} = constM . liftIO $ do
-        let o = liftIO . atomically . putTMVar output
-        i <- atomically $ takeTMVar input
-        t <- getCurrentTime
-        pure (t, (i, o))
+type instance RouteInput (EmptyAPI :> api) = RouteInput api
 
-    handler RouteClock{..} = undefined -- liftIO $ do
-        -- atomically . takeTMVar $ output
+instance (StoreInputs api) => StoreInputs (EmptyAPI :> api) where
+    withInputs = withInputs @api
 
-newtype RequestClock (m :: Type -> Type) api = RequestClock {port :: Port}
+type instance RouteInput (BasicAuth _ usr :> api) = (usr, RouteInput api)
 
-instance (MonadIO m, HasRhineRoutes m api) => Clock m (RequestClock m api) where
-    type Time (RequestClock m api) = UTCTime
-    type Tag (RequestClock m api) = (RhineInput api, RhineOutput api -> m ())
-    initClock RequestClock{..} = do
-        routes <- initRoutes @m @api
-        let clock = scheduleRoutes @m @api routes
-        time <- liftIO getCurrentTime
-        void . liftIO . forkIO . Warp.run port . serve (Proxy :: Proxy api) $ handler @m @api routes
-        pure (clock, time)
+instance (StoreInputs api) => StoreInputs (BasicAuth realm usr :> api) where
+    withInputs store k usr = withInputs @api (store . (usr,)) k
 
-instance GetClockProxy (RequestClock m api)
+type instance RouteInput (WithNamedContext _ _ subApi) = RouteInput subApi
 
-infixr 3 <@|>
+-- instance (StoreInputs subApi) => StoreInputs (WithNamedContext name subContext subApi) where
+--     withInputs = withInputs @subApi
 
-(<@|>)
-    :: (Monad m)
-    => ClSF m (RouteClock route) st (st, RhineOutput route)
-    -> ClSF m (RequestClock m api) st st
-    -> ClSF m (RequestClock m (route :<|> api)) st st
-handler' <@|> rest = proc st -> do
-    (tag, dispatch) <- tagS -< ()
-    case tag of
-        Left _ -> do
-            (st', o) <- hoistRouteClock handler' -< st
-            arrMCl (\(dispatch, o) -> dispatch $ Left o) -< (dispatch, o)
-            returnA -< st'
-        Right _ -> hoistRequestClock rest -< st
-  where
-    hoistRouteClock :: (Monad m) => ClSF m (RouteClock route) a b -> ClSF m (RequestClock m (route :<|> api)) a b
-    hoistRouteClock = hoistS $ withReaderT . retag $ fromLeft undefined . fst
-    hoistRequestClock :: (Monad m) => ClSF m (RequestClock m api) a b -> ClSF m (RequestClock m (route :<|> api)) a b
-    hoistRequestClock = hoistS $ withReaderT . retag $ \(i, dispatch) -> (fromRight undefined i, dispatch . Right)
--}
+type instance RouteInput (Fragment _ :> api) = RouteInput api
+
+instance (StoreInputs api) => StoreInputs (Fragment a1 :> api) where
+    withInputs = withInputs @api
+
+type instance RouteOutput (_ :> api) = RouteOutput api
 
 data RouteClock route = RouteClock
     { input :: TMVar (RouteInput route)
@@ -316,39 +187,6 @@ instance Clock m (RouteClock route) where
     type Time (RouteClock route) = UTCTime
     type Tag (RouteClock route) = (RouteInput route, RouteOutput route -> IO ())
     initClock = error "Running RouteClock standalone is not supported"
-
-type family RouteInput api :: Type
-
-type instance
-    RouteInput (ReqBody' mods _ a :> api) =
-        (If (FoldLenient mods) (Either String a) a, RouteInput api)
-
-type instance RouteInput (QueryString :> api) = (Query, RouteInput api)
-
-type instance RouteInput ((_path :: Symbol) :> api) = RouteInput api
-
-type instance RouteInput (Verb _ _ _ _) = ()
-
-type family RouteOutput api :: Type
-
-type instance RouteOutput (Verb _ _ _ a) = a
-
-type instance RouteOutput (_ :> api) = RouteOutput api
-
-class StoreInputs route where
-    withInputs :: (RouteInput route -> Handler ()) -> Handler (RouteOutput route) -> Server route
-
-instance (StoreInputs api) => StoreInputs (ReqBody' mods list a :> api) where
-    withInputs store k body = withInputs @api (store . (body,)) k
-
-instance (StoreInputs api) => StoreInputs (QueryString :> api) where
-    withInputs store k query = withInputs @api (store . (query,)) k
-
-instance (StoreInputs api) => StoreInputs ((_path :: Symbol) :> api) where
-    withInputs = withInputs @api
-
-instance StoreInputs (Verb method status ctypes a) where
-    withInputs store k = store () >> k
 
 data AsServerClSF (m :: Type -> Type) (state :: Type)
 
@@ -384,11 +222,10 @@ instance (MonadIO m, MonadSchedule m, StoreInputs api) => GToInnerClock m (K1 i 
     type GInnerClock (K1 i (RouteClock api)) = RouteClock api
     type GHandler (K1 i (RouteClock api)) = K1 i (Server api)
 
-    initRouteClock =
-        K1 <$> do
-            input <- liftIO newEmptyTMVarIO
-            output <- liftIO newEmptyTMVarIO
-            pure RouteClock{..}
+    initRouteClock = do
+        input <- liftIO newEmptyTMVarIO
+        output <- liftIO newEmptyTMVarIO
+        pure $ K1 RouteClock{..}
 
     scheduleRouteClock (K1 RouteClock{..}) = constM . liftIO $ do
         let o = atomically . putTMVar output
@@ -427,7 +264,7 @@ instance (MonadIO m, output ~ RouteOutput r) => GClSFCombine m state (K1 i (ClSF
     gClSFCombine (K1 handlerClSF) = proc st -> do
         (_, dispatch) <- tagS -< ()
         (st', o) <- handlerClSF -< st
-        arrMCl (uncurry ($)) -< (liftIO . dispatch, o)
+        arrMCl liftIO -< dispatch o
         returnA -< st'
 
 instance
@@ -446,9 +283,9 @@ instance
             Right _ -> hoistR (gClSFCombine @m @state r) -< st
       where
         hoistL :: ClSF m (GClockFromClSF l) state state -> ClSF m (ParallelClock (GClockFromClSF l) (GClockFromClSF r)) state state
-        hoistL = hoistS $ withReaderT . retag $ fromLeft undefined
+        hoistL = hoistS $ withReaderT . retag . fromLeft $ undefined
         hoistR :: ClSF m (GClockFromClSF r) state state -> ClSF m (ParallelClock (GClockFromClSF l) (GClockFromClSF r)) state state
-        hoistR = hoistS $ withReaderT . retag $ fromRight undefined
+        hoistR = hoistS $ withReaderT . retag . fromRight $ undefined
 
 newtype RequestClock (routes :: Type -> Type) = RequestClock {port :: Port}
 
@@ -481,7 +318,7 @@ instance
         innerClock <- initRouteClock @_ @(Rep (routes AsRouteClock))
         let clock = scheduleRouteClock innerClock
         time <- liftIO getCurrentTime
-        void . liftIO . forkIO . Warp.run port . genericServe @routes $ handler @m (to innerClock)
+        void . liftIO . forkIO . Warp.run port . genericServe @routes . handler @m . to $ innerClock
         pure (clock, time)
 
 instance GetClockProxy (RequestClock routes)
