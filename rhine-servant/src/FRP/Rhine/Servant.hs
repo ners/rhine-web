@@ -6,15 +6,22 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module FRP.Rhine.Servant (RequestClock (..), RouteClock, genericServeClSF) where
+module FRP.Rhine.Servant
+    ( RequestClock (..)
+    , RouteClock
+    , genericServe
+    , genericServeClSF
+    , requestClock
+    , toHandler
+    )
+where
 
-import Control.Concurrent (forkIO)
 import Control.Concurrent.STM
+import Control.Exception (throwIO)
 import Control.Monad.Schedule.Class (MonadSchedule)
 import Control.Monad.Trans.Reader (withReaderT)
 import Control.Monad.Trans.Resource (ReleaseKey)
 import Data.Either (fromLeft, fromRight)
-import Data.Functor (void)
 import Data.Kind (Type)
 import Data.Time (getCurrentTime)
 import Data.Void (Void)
@@ -23,8 +30,7 @@ import GHC.Generics (Generic (..), K1 (..), M1 (..), (:*:) (..))
 import GHC.TypeLits (Symbol)
 import Network.HTTP.Types (Query)
 import Network.Socket (SockAddr)
-import Network.Wai.Handler.Warp (Port)
-import Network.Wai.Handler.Warp qualified as Warp
+import Network.Wai qualified as Wai
 import Servant.API
 import Servant.API.Modifiers (FoldLenient, RequestArgument)
 import Servant.Server
@@ -38,6 +44,14 @@ type family RouteOutput api :: Type
 class StoreInputs route where
     withInputs :: (RouteInput route -> Handler ()) -> Handler (RouteOutput route) -> Server route
 
+type instance RouteInput Raw = Wai.Request
+
+type instance RouteOutput Raw = Wai.Response
+
+instance StoreInputs Raw where
+    withInputs :: (Wai.Request -> Handler ()) -> Handler Wai.Response -> Server Raw
+    withInputs store k = Tagged $ \req k' -> either throwIO k' =<< runHandler (store req >> k)
+
 type instance RouteInput (Capture' mods _ a :> api) = (If (FoldLenient mods) (Either String a) a, RouteInput api)
 
 instance (StoreInputs api) => StoreInputs (Capture' mods capture a :> api) where
@@ -50,8 +64,8 @@ instance (StoreInputs api) => StoreInputs (CaptureAll sym a :> api) where
 
 type instance RouteInput (WithResource a :> api) = ((ReleaseKey, a), RouteInput api)
 
--- instance (StoreInputs api) => StoreInputs (WithResource a :> api) where
---     withInputs store k a = withInputs @api (store . (a,)) k
+instance (StoreInputs api) => StoreInputs (WithResource (a :: Type) :> api) where
+    withInputs store k a = withInputs @api (store . (a,)) k
 
 type instance RouteInput (Verb _ _ _ _) = ()
 
@@ -81,18 +95,18 @@ instance (StoreInputs api) => StoreInputs (Header' mods sym a :> api) where
 
 type instance RouteInput (QueryParam' mods _ a :> api) = (RequestArgument mods a, RouteInput api)
 
--- instance (StoreInputs api) => StoreInputs (QueryParam' mods sym a) where
---     withInputs store k a = withInputs @api (store . (a,)) k
+instance (StoreInputs api) => StoreInputs (QueryParam' mods sym a :> api) where
+    withInputs store k a = withInputs @api (store . (a,)) k
 
 type instance RouteInput (QueryParams _ a :> api) = ([a], RouteInput api)
 
--- instance (StoreInputs api) => StoreInputs (QueryParams sym a) where
---     withInputs store k as = withInputs @api (store . (as,)) k
+instance (StoreInputs api) => StoreInputs (QueryParams sym a :> api) where
+    withInputs store k as = withInputs @api (store . (as,)) k
 
 type instance RouteInput (QueryFlag _ :> api) = (Bool, RouteInput api)
 
--- instance (StoreInputs api) => StoreInputs (QueryFlag sym) where
---     withInputs store k b = withInputs @api (store . (b,)) k
+instance (StoreInputs api) => StoreInputs (QueryFlag sym :> api) where
+    withInputs store k b = withInputs @api (store . (b,)) k
 
 type instance RouteInput (QueryString :> api) = (Query, RouteInput api)
 
@@ -101,8 +115,8 @@ instance (StoreInputs api) => StoreInputs (QueryString :> api) where
 
 type instance RouteInput (DeepQuery _ a :> api) = (a, RouteInput api)
 
--- instance (StoreInputs api) => StoreInputs (DeepQuery sym a) where
---     withInputs store k a = withInputs @api (store . (a,)) k
+instance (StoreInputs api) => StoreInputs (DeepQuery sym a :> api) where
+    withInputs store k a = withInputs @api (store . (a,)) k
 
 type instance RouteInput (ReqBody' mods _ a :> api) = (If (FoldLenient mods) (Either String a) a, RouteInput api)
 
@@ -111,8 +125,8 @@ instance (StoreInputs api) => StoreInputs (ReqBody' mods list a :> api) where
 
 type instance RouteInput (StreamBody' _ _ _ a :> api) = (a, RouteInput api)
 
--- instance (StoreInputs api) => StoreInputs (StreamBody' mods framing contentType a) where
---     withInputs store k body = withInputs @api (store . (body,)) k
+instance (StoreInputs api) => StoreInputs (StreamBody' mods framing contentType a :> api) where
+    withInputs store k body = withInputs @api (store . (body,)) k
 
 type instance RouteInput ((_path :: Symbol) :> api) = RouteInput api
 
@@ -168,8 +182,10 @@ instance (StoreInputs api) => StoreInputs (BasicAuth realm usr :> api) where
 
 type instance RouteInput (WithNamedContext _ _ subApi) = RouteInput subApi
 
--- instance (StoreInputs subApi) => StoreInputs (WithNamedContext name subContext subApi) where
---     withInputs = withInputs @subApi
+type instance RouteOutput (WithNamedContext _ _ subApi) = RouteOutput subApi
+
+instance (StoreInputs subApi) => StoreInputs (WithNamedContext name subContext subApi) where
+    withInputs = withInputs @subApi
 
 type instance RouteInput (Fragment _ :> api) = RouteInput api
 
@@ -287,24 +303,32 @@ instance
         hoistR :: ClSF m (GClockFromClSF r) state state -> ClSF m (ParallelClock (GClockFromClSF l) (GClockFromClSF r)) state state
         hoistR = hoistS $ withReaderT . retag . fromRight $ undefined
 
-newtype RequestClock (routes :: Type -> Type) = RequestClock {port :: Port}
+newtype RequestClock (routes :: Type -> Type) = RequestClock {innerClock :: routes AsRouteClock}
 
-handler
+toHandler
     :: forall m routes
      . ( Generic (routes AsRouteClock)
        , Generic (routes AsServer)
        , GToInnerClock m (Rep (routes AsRouteClock))
        , GHandler (Rep (routes AsRouteClock)) ~ Rep (routes AsServer)
        )
-    => routes AsRouteClock
+    => RequestClock routes
     -> routes AsServer
-handler = to . grouteHandler @m @(Rep (routes AsRouteClock)) . from
+toHandler RequestClock{..} = to . grouteHandler @m . from $ innerClock
+
+requestClock
+    :: forall routes m
+     . ( GToInnerClock m (Rep (routes AsRouteClock))
+       , Generic (routes AsRouteClock)
+       )
+    => m (RequestClock routes)
+requestClock = do
+    innerClock <- to <$> initRouteClock @_ @(Rep (routes AsRouteClock))
+    pure RequestClock{..}
 
 instance
     forall m routes
      . ( MonadIO m
-       , HasServer (ToServantApi routes) '[]
-       , GenericServant routes AsServer
        , Server (ToServantApi routes) ~ ToServant routes AsServer
        , GToInnerClock m (Rep (routes AsRouteClock))
        , Generic (routes AsRouteClock)
@@ -315,10 +339,8 @@ instance
     type Time (RequestClock routes) = UTCTime
     type Tag (RequestClock routes) = Tag (GInnerClock (Rep (routes AsRouteClock)))
     initClock RequestClock{..} = do
-        innerClock <- initRouteClock @_ @(Rep (routes AsRouteClock))
-        let clock = scheduleRouteClock innerClock
+        let clock = scheduleRouteClock . from $ innerClock
         time <- liftIO getCurrentTime
-        void . liftIO . forkIO . Warp.run port . genericServe @routes . handler @m . to $ innerClock
         pure (clock, time)
 
 instance GetClockProxy (RequestClock routes)

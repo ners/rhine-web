@@ -51,6 +51,8 @@ common common
     base >=4 && <5,
     rhine,
     servant,
+    servant-server,
+    wai,
 
 library
   import: common
@@ -64,11 +66,9 @@ library
     network,
     resourcet,
     servant,
-    servant-server,
     stm,
     time,
     transformers,
-    warp,
 
 test-suite test
   import: common
@@ -78,10 +78,12 @@ test-suite test
   main-is: Main.hs
   build-depends:
     aeson,
+    bytestring,
     hspec,
     http-client,
     http-types,
-    monad-schedule,
     rhine-servant,
     servant-client,
     servant-client-core,
+    text,
+    warp,

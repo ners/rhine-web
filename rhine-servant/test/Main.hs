@@ -8,24 +8,26 @@ module Main where
 
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Exception (bracket)
-import Control.Monad.Schedule.Class
+import Control.Monad (forM_)
 import Data.Aeson (FromJSON, ToJSON)
-import Data.Void (Void)
+import Data.ByteString.Lazy qualified as LazyByteString
+import Data.Maybe (listToMaybe)
+import Data.String (fromString)
+import Data.Text qualified as Text
 import FRP.Rhine
 import FRP.Rhine.Servant
 import GHC.Generics (Generic)
 import Network.HTTP.Client (defaultManagerSettings, newManager)
+import Network.HTTP.Types (methodGet, status200)
+import Network.HTTP.Types.Status (ok200)
 import Network.HTTP.Types.URI (Query)
+import Network.Wai qualified as Wai
+import Network.Wai.Handler.Warp qualified as Warp
+import Servant (serveDirectoryFileServer)
 import Servant.API
-import Servant.Client
-    ( AsClientT
-    , BaseUrl (..)
-    , ClientEnv
-    , ClientM
-    , Scheme (..)
-    , mkClientEnv
-    , runClientM
-    )
+import Servant.Client (AsClientT, BaseUrl (..), ClientEnv, ClientM, ResponseF (..), Scheme (..), mkClientEnv, runClientM)
+import Servant.Client.Core (defaultRequest, requestPath)
+import Servant.Client.Core.RunClient (runRequest)
 import Servant.Client.Generic (genericClient)
 import Test.Hspec
 import Prelude
@@ -43,21 +45,28 @@ emptyState = State{tickCounter = 0, getRequestCounter = 0}
 tick :: (Monad m) => ClSF m cl State State
 tick = arr \st -> st{tickCounter = tickCounter st + 1}
 
-printState :: ClSF IO cl State ()
-printState = arrMCl print
+printState :: (MonadIO m) => ClSF m cl State ()
+printState = arrMCl $ liftIO . print
 
-data Routes route = Routes
+data RhineRoutes route = RhineRoutes
     { get :: route :- Get '[JSON] State
     , put :: route :- ReqBody '[JSON] State :> Put '[JSON] NoContent
     , delete :: route :- Delete '[JSON] NoContent
     , queries :: route :- "queries" :> QueryString :> Get '[JSON] String
+    , raw :: route :- "raw" :> Raw
+    }
+    deriving stock (Generic)
+
+data Routes route = Routes
+    { rhine :: route :- "rhine" :> NamedRoutes RhineRoutes
+    , files :: route :- Raw
     }
     deriving stock (Generic)
 
 type Api = ToServantApi Routes
 
-apiSf :: forall m. (MonadIO m) => ClSF m (RequestClock Routes) State State
-apiSf = genericServeClSF Routes{..}
+apiSf :: forall m. (MonadIO m) => ClSF m (RequestClock RhineRoutes) State State
+apiSf = genericServeClSF RhineRoutes{..}
   where
     get :: ClSF m (RouteClock (Get '[JSON] State)) State (State, State)
     get = arr \st -> let st' = st{getRequestCounter = getRequestCounter st + 1} in (st', st')
@@ -69,22 +78,13 @@ apiSf = genericServeClSF Routes{..}
     queries = proc st -> do
         ((qs, ()), _) <- tagS -< ()
         returnA -< (st, show qs)
+    raw :: ClSF m (RouteClock ("raw" :> Raw)) State (State, Wai.Response)
+    raw =
+        returnA &&& tagS >>> arrMCl \(st, (req, _)) ->
+            let name = maybe "world" (fromString . Text.unpack) . listToMaybe $ req.pathInfo
+             in pure (st, Wai.responseLBS status200 mempty $ "Hello, " <> name <> "!")
 
-startApi :: IO Void
-startApi = do
-    let port = 8080 :: Int
-    let tickRh :: Rhine IO (Millisecond 1) State State
-        tickRh = tick @@ waitClock
-    let printRh :: Rhine IO (Millisecond 1000) State ()
-        printRh = printState @@ waitClock
-    let apiRh :: (MonadIO m, MonadSchedule m) => Rhine m (RequestClock Routes) State State
-        apiRh = apiSf @@ RequestClock{..}
-    flow $
-        feedbackRhine (keepLast emptyState) (snd ^>>@ (tickRh |@| apiRh) @>>^ \st -> (st, st))
-            >-- keepLast emptyState
-            --> printRh
-
-setup :: IO (ThreadId, ClientEnv)
+setup :: IO ([ThreadId], ClientEnv)
 setup = do
     let initialState = State{tickCounter = 0, getRequestCounter = 0}
     let port = 8080 :: Int
@@ -92,13 +92,25 @@ setup = do
         tickRh = tick @@ waitClock
     let printRh :: Rhine IO (Millisecond 1000) State ()
         printRh = printState @@ waitClock
-    let apiRh :: (MonadIO m, MonadSchedule m) => Rhine m (RequestClock Routes) State State
-        apiRh = apiSf @@ RequestClock{..}
-    threadId <-
+
+    clock <- requestClock @RhineRoutes
+
+    let apiRh :: Rhine IO (RequestClock RhineRoutes) State State
+        apiRh = apiSf @@ clock
+
+    rhineThread <-
         forkIO . flow $
             feedbackRhine (keepLast initialState) (snd ^>>@ (tickRh |@| apiRh) @>>^ \st -> (st, st))
                 >-- keepLast initialState
                 --> printRh
+
+    warpThread <-
+        forkIO . Warp.run port . genericServe $
+            Routes
+                { rhine = toHandler @IO clock
+                , files = serveDirectoryFileServer "."
+                }
+
     manager <- newManager defaultManagerSettings
     let baseUrl =
             BaseUrl
@@ -108,10 +120,10 @@ setup = do
                 , baseUrlHost = "localhost"
                 }
     let clientEnv = mkClientEnv manager baseUrl
-    pure (threadId, clientEnv)
+    pure ([rhineThread, warpThread], clientEnv)
 
-teardown :: (ThreadId, ClientEnv) -> IO ()
-teardown (threadId, _) = killThread threadId
+teardown :: ([ThreadId], ClientEnv) -> IO ()
+teardown (threads, _) = forM_ threads killThread
 
 withApi :: (ClientEnv -> IO ()) -> IO ()
 withApi = bracket setup teardown . (. snd)
@@ -120,36 +132,49 @@ apiClient :: Routes (AsClientT ClientM)
 apiClient = genericClient
 
 runClientM' :: ClientM a -> ClientEnv -> IO a
-runClientM' a e = either (error . show) id <$> runClientM a e
+runClientM' a e = either (fail . show) pure =<< runClientM a e
 
 main :: IO ()
 main = hspec . around withApi . it "works" $ runClientM' do
+    runRequest defaultRequest{requestPath = "/rhine-servant.cabal"} >>= \Response{..} -> liftIO do
+        responseStatusCode `shouldBe` ok200
+        expected <- LazyByteString.readFile "./rhine-servant.cabal"
+        responseBody `shouldBe` expected
+
+    apiClient.rhine.raw methodGet >>= \Response{..} -> liftIO do
+        responseStatusCode `shouldBe` ok200
+        responseBody `shouldBe` "Hello, world!"
+
+    runRequest defaultRequest{requestPath = "/rhine/raw/Rhine"} >>= \Response{..} -> liftIO do
+        responseStatusCode `shouldBe` ok200
+        responseBody `shouldBe` "Hello, Rhine!"
+
     liftIO $ threadDelay 1000
-    st0 <- apiClient.get
+    st0 <- apiClient.rhine.get
     liftIO do
         tickCounter st0 `shouldSatisfy` (> tickCounter emptyState)
         getRequestCounter st0 `shouldBe` getRequestCounter emptyState + 1
         threadDelay 1000
-    st1 <- apiClient.get
+    st1 <- apiClient.rhine.get
     liftIO do
         tickCounter st1 `shouldSatisfy` (> tickCounter st0)
         getRequestCounter st1 `shouldBe` getRequestCounter st0 + 1
-    apiClient.delete
-    st2 <- apiClient.get
+    apiClient.rhine.delete
+    st2 <- apiClient.rhine.get
     liftIO do
         tickCounter st2 `shouldSatisfy` (< tickCounter st1)
         getRequestCounter st2 `shouldBe` getRequestCounter emptyState + 1
     let putState = State{tickCounter = 10 ^ (9 :: Int), getRequestCounter = 42}
-    apiClient.put putState
-    st3 <- apiClient.get
+    apiClient.rhine.put putState
+    st3 <- apiClient.rhine.get
     liftIO do
         tickCounter st3 `shouldSatisfy` (>= tickCounter putState)
         getRequestCounter st3 `shouldBe` (getRequestCounter putState + 1)
 
     let q :: Query
         q = [("This", Just "is"), ("a", Just "query"), ("string", Nothing)]
-    r <- apiClient.queries q
-    st4 <- apiClient.get
+    r <- apiClient.rhine.queries q
+    st4 <- apiClient.rhine.get
     liftIO do
         tickCounter st4 `shouldSatisfy` (>= tickCounter st3)
         getRequestCounter st4 `shouldBe` (getRequestCounter st3 + 1)
