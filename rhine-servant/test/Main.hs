@@ -48,12 +48,18 @@ tick = arr \st -> st{tickCounter = tickCounter st + 1}
 printState :: (MonadIO m) => ClSF m cl State ()
 printState = arrMCl $ liftIO . print
 
+newtype NamedRhineRoutes route = NamedRhineRoutes
+    { test :: route :- Get '[JSON] State
+    }
+    deriving stock (Generic)
+
 data RhineRoutes route = RhineRoutes
     { get :: route :- Get '[JSON] State
     , put :: route :- ReqBody '[JSON] State :> Put '[JSON] NoContent
     , delete :: route :- Delete '[JSON] NoContent
     , queries :: route :- "queries" :> QueryString :> Get '[JSON] String
     , raw :: route :- "raw" :> Raw
+    , named :: route :- "named" :> NamedRoutes NamedRhineRoutes
     }
     deriving stock (Generic)
 
@@ -83,6 +89,8 @@ apiSf = genericServeClSF RhineRoutes{..}
         returnA &&& tagS >>> arrMCl \(st, (req, _)) ->
             let name = maybe "world" (fromString . Text.unpack) . listToMaybe $ req.pathInfo
              in pure (st, Wai.responseLBS status200 mempty $ "Hello, " <> name <> "!")
+    named :: ClSF m (RequestClock NamedRhineRoutes) State State
+    named = genericServeClSF NamedRhineRoutes { test = get }
 
 setup :: IO ([ThreadId], ClientEnv)
 setup = do
@@ -155,7 +163,7 @@ main = hspec . around withApi . it "works" $ runClientM' do
         tickCounter st0 `shouldSatisfy` (> tickCounter emptyState)
         getRequestCounter st0 `shouldBe` getRequestCounter emptyState + 1
         threadDelay 1000
-    st1 <- apiClient.rhine.get
+    st1 <- apiClient.rhine.named.test
     liftIO do
         tickCounter st1 `shouldSatisfy` (> tickCounter st0)
         getRequestCounter st1 `shouldBe` getRequestCounter st0 + 1

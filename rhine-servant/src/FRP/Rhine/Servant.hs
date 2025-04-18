@@ -206,15 +206,43 @@ instance Clock m (RouteClock route) where
 
 data AsServerClSF (m :: Type -> Type) (state :: Type)
 
+type family AsServerClSFT' m state path api where
+    AsServerClSFT' m state _ (NamedRoutes routes) = ClSF m (RequestClock routes) state state
+    AsServerClSFT' m state path api = ClSF m (RouteClock (ReconstitutePath path api)) state (state, RouteOutput (ReconstitutePath path api))
+
+type family AsServerClSFT m state api where
+    AsServerClSFT m state api = AsServerClSFT' m state (CollectPath api) (RemovePath api)
+
+data KindProxy (a :: k)
+
+type family CollectPath (api :: Type) :: [Type] where
+    CollectPath (path :> api) = KindProxy path ': CollectPath api
+    CollectPath _ = '[]
+
+type family RemovePath api where
+    RemovePath (_ :> api) = RemovePath api
+    RemovePath api = api
+
+type family ReconstitutePath path api where
+    ReconstitutePath (KindProxy p ': p') api = p :> ReconstitutePath p' api
+    ReconstitutePath '[] api = api
+
 instance GenericMode (AsServerClSF m state) where
     type
         (AsServerClSF m state) :- api =
-            ClSF m (RouteClock api) state (state, RouteOutput api)
+            AsServerClSFT m state api
 
 data AsRouteClock
 
+type family AsRouteClockT' path api where
+    AsRouteClockT' _ (NamedRoutes routes) = RequestClock routes
+    AsRouteClockT' path api = RouteClock (ReconstitutePath path api)
+
+type family AsRouteClockT api where
+    AsRouteClockT api = AsRouteClockT' (CollectPath api) (RemovePath api)
+
 instance GenericMode AsRouteClock where
-    type AsRouteClock :- api = RouteClock api
+    type AsRouteClock :- api = AsRouteClockT api
 
 class (MonadIO m, MonadSchedule m) => GToInnerClock m f where
     type GInnerClock f
@@ -255,6 +283,23 @@ instance (MonadIO m, MonadSchedule m, StoreInputs api) => GToInnerClock m (K1 i 
                 (liftIO . atomically . putTMVar input)
                 (liftIO . atomically $ takeTMVar output)
 
+instance
+    ( MonadIO m
+    , MonadSchedule m
+    , Generic (routes AsServer)
+    , Generic (routes AsRouteClock)
+    , GToInnerClock m (Rep (routes AsRouteClock))
+    , GHandler (Rep (routes AsRouteClock)) ~ Rep (routes AsServer)
+    )
+    => GToInnerClock m (K1 i (RequestClock routes))
+    where
+    type GInnerClock (K1 i (RequestClock routes)) = RequestClock routes
+    type GHandler (K1 i (RequestClock routes)) = K1 i (routes AsServer)
+
+    initRouteClock = K1 <$> requestClock
+    scheduleRouteClock (K1 RequestClock{..}) = scheduleRouteClock . from $ innerClock
+    grouteHandler (K1 cl) = K1 $ toHandler @m cl
+
 instance (GToInnerClock m l, GToInnerClock m r) => GToInnerClock m (l :*: r) where
     type GInnerClock (l :*: r) = GInnerClock l `ParallelClock` GInnerClock r
     type GHandler (l :*: r) = GHandler l :*: GHandler r
@@ -282,6 +327,10 @@ instance (MonadIO m, output ~ RouteOutput r) => GClSFCombine m state (K1 i (ClSF
         (st', o) <- handlerClSF -< st
         arrMCl liftIO -< dispatch o
         returnA -< st'
+
+instance GClSFCombine m state (K1 i (ClSF m (RequestClock routes) state state)) where
+    type GClockFromClSF (K1 i (ClSF m (RequestClock routes) state state)) = RequestClock routes
+    gClSFCombine (K1 requestClSF) = requestClSF
 
 instance
     ( Monad m
