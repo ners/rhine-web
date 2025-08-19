@@ -59,6 +59,7 @@ library
   hs-source-dirs: src
   exposed-modules:
     FRP.Rhine.Servant
+    FRP.Rhine.Servant.Internal
 
   build-depends:
     http-types,

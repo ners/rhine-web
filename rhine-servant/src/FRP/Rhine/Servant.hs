@@ -5,6 +5,7 @@
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 module FRP.Rhine.Servant
     ( RequestClock (..)
@@ -26,6 +27,7 @@ import Data.Kind (Type)
 import Data.Time (getCurrentTime)
 import Data.Void (Void)
 import FRP.Rhine
+import FRP.Rhine.Servant.Internal
 import GHC.Generics (Generic (..), K1 (..), M1 (..), (:*:) (..))
 import GHC.TypeLits (Symbol)
 import Network.HTTP.Types (Query)
@@ -36,13 +38,6 @@ import Servant.API.Modifiers (FoldLenient, RequestArgument)
 import Servant.Server
 import Servant.Server.Generic (AsServer, genericServe)
 import Prelude
-
-type family RouteInput api :: Type
-
-type family RouteOutput api :: Type
-
-class StoreInputs route where
-    withInputs :: (RouteInput route -> Handler ()) -> Handler (RouteOutput route) -> Server route
 
 type instance RouteInput Raw = Wai.Request
 

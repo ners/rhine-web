@@ -90,7 +90,7 @@ apiSf = genericServeClSF RhineRoutes{..}
             let name = maybe "world" (fromString . Text.unpack) . listToMaybe $ req.pathInfo
              in pure (st, Wai.responseLBS status200 mempty $ "Hello, " <> name <> "!")
     named :: ClSF m (RequestClock NamedRhineRoutes) State State
-    named = genericServeClSF NamedRhineRoutes { test = get }
+    named = genericServeClSF NamedRhineRoutes{test = get}
 
 setup :: IO ([ThreadId], ClientEnv)
 setup = do

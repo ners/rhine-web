@@ -6,10 +6,6 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
-    rhine = {
-      url = "github:turion/rhine";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
   outputs = inputs:
@@ -64,21 +60,13 @@
         pkgs.haskell.packages;
       hpsFor = pkgs: { default = pkgs.haskellPackages; } // ghcsFor pkgs;
       overlay = lib.composeManyExtensions [
-        inputs.rhine.overlays.default
         (final: prev: {
           haskell = prev.haskell // {
             packageOverrides = lib.composeManyExtensions [
               prev.haskell.packageOverrides
               (cabalProjectOverlay project)
               (hfinal: hprev: with prev.haskell.lib.compose; {
-                morpheus-graphql-app = unmarkBroken hprev.morpheus-graphql-app_0_28_1;
-                morpheus-graphql-code-gen = unmarkBroken hprev.morpheus-graphql-code-gen;
-                morpheus-graphql-code-gen-utils = hprev.morpheus-graphql-code-gen-utils_0_28_1;
-                morpheus-graphql-tests = hprev.morpheus-graphql-tests_0_28_1;
-                morpheus-graphql-client = hprev.morpheus-graphql-client_0_28_1;
-                morpheus-graphql-core = hprev.morpheus-graphql-core_0_28_1;
-                morpheus-graphql-server = hprev.morpheus-graphql-server_0_28_1;
-                morpheus-graphql-subscriptions = hprev.morpheus-graphql-subscriptions_0_28_1;
+                changeset = dontCheck hprev.changeset;
               })
             ];
           };
